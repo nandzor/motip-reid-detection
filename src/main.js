@@ -42,7 +42,7 @@ const app = {
     
     // Config
     modelPath: '/models/yolov8n.onnx', // Update this path to your model
-    confidenceThreshold: 0.5,
+    confidenceThreshold: 0.75,
     maxMemorySeconds: 60
 };
 
@@ -62,6 +62,10 @@ async function init() {
     app.statusDiv = document.getElementById('status');
     app.confidenceSlider = document.getElementById('confidenceSlider');
     app.confidenceValue = document.getElementById('confidenceValue');
+    
+    // Initialize confidence slider with default value
+    app.confidenceSlider.value = app.confidenceThreshold;
+    app.confidenceValue.textContent = app.confidenceThreshold.toFixed(2);
     
     // Setup event listeners
     app.startBtn.addEventListener('click', startWebcam);
@@ -215,7 +219,7 @@ function resetTracker() {
 function updateConfidenceThreshold(e) {
     const value = parseFloat(e.target.value);
     app.confidenceThreshold = value;
-    app.confidenceValue.textContent = value.toFixed(1);
+    app.confidenceValue.textContent = value.toFixed(2);
     
     if (app.detector) {
         app.detector.setConfidenceThreshold(value);
@@ -339,7 +343,10 @@ function drawBoundingBoxes(tracks, currentTime) {
     let activeCount = 0;
     let memoryCount = 0;
     
-    for (const track of tracks) {
+    // Filter only active tracks for rendering (lost tracks are kept in memory for re-identification but not displayed)
+    const activeTracks = tracks.filter(track => track.state === 'active');
+    
+    for (const track of activeTracks) {
         const [x1, y1, x2, y2] = track.box.map(v => Math.round(v));
         const [r, g, b] = track.color;
         
@@ -349,24 +356,12 @@ function drawBoundingBoxes(tracks, currentTime) {
             continue; // Skip invalid boxes
         }
         
-        // Determine if track is in memory (lost but within 60 seconds)
-        const isInMemory = track.state === 'lost' && 
-                          (currentTime - track.lastSeen) <= app.maxMemorySeconds;
+        // Count active tracks
+        activeCount++;
         
-        if (track.state === 'active') {
-            activeCount++;
-        } else if (isInMemory) {
-            memoryCount++;
-        }
-        
-        // Draw semi-transparent fill for better visibility
-        if (isInMemory) {
-            app.ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.15)`;
-            app.ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
-        } else {
-            app.ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.1)`;
-            app.ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
-        }
+        // Draw semi-transparent fill for better visibility (only for active tracks)
+        app.ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.1)`;
+        app.ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
         
         // Draw bounding box border
         app.ctx.strokeStyle = `rgb(${r}, ${g}, ${b})`;
@@ -389,18 +384,11 @@ function drawBoundingBoxes(tracks, currentTime) {
         app.ctx.fillRect(x2 - cornerSize + 2, y2 - 1, cornerSize, 3);
         app.ctx.fillRect(x2 - 1, y2 - cornerSize + 2, 3, cornerSize);
         
-        // Calculate duration
+        // Calculate duration (only for active tracks)
         const duration = currentTime - track.created;
-        const memoryTime = track.state === 'lost' ? 
-                          Math.max(0, app.maxMemorySeconds - (currentTime - track.lastSeen)) : 0;
         
-        // Prepare label
-        let label = `ID: ${track.id}`;
-        if (track.state === 'active') {
-            label += ` | ${duration.toFixed(1)}s`;
-        } else if (isInMemory) {
-            label += ` | Memory: ${memoryTime.toFixed(1)}s`;
-        }
+        // Prepare label (only show for active tracks)
+        let label = `ID: ${track.id} | ${duration.toFixed(1)}s`;
         if (track.score) {
             label += ` | ${(track.score * 100).toFixed(0)}%`;
         }
@@ -419,6 +407,14 @@ function drawBoundingBoxes(tracks, currentTime) {
         app.ctx.fillStyle = '#ffffff';
         app.ctx.font = 'bold 14px Arial';
         app.ctx.fillText(label, x1 + 6, y1 - 6);
+    }
+    
+    // Count memory tracks for statistics (but don't display them)
+    for (const track of tracks) {
+        if (track.state === 'lost' && 
+            (currentTime - track.lastSeen) <= app.maxMemorySeconds) {
+            memoryCount++;
+        }
     }
     
     // Draw statistics overlay

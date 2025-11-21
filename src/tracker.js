@@ -9,6 +9,11 @@ export class PersonTracker {
         this.tracks = new Map(); // trackId -> Track
         this.nextId = 1;
         this.featureHistory = new Map(); // trackId -> feature history
+        
+        // Re-identification parameters for better accuracy
+        this.minReIdDelaySeconds = 0.5; // Minimum time before re-ID (prevents immediate false matches)
+        this.reIdSimilarityThreshold = 0.75; // Higher threshold for re-ID (was 0.5)
+        this.maxReIdDistanceRatio = 2.0; // Max distance ratio from last position (2x bbox size)
     }
 
     /**
@@ -222,9 +227,16 @@ export class PersonTracker {
         }
         
         // Second pass: Re-ID matching for lost tracks (within memory window)
+        // Collect all potential re-ID matches first, then select best matches
+        const reIdCandidates = [];
+        
         for (const [trackId, track] of this.tracks.entries()) {
             if (track.state !== 'lost' || matchedTrackIds.has(trackId)) continue;
             if (currentTime - track.lastSeen > this.maxMemorySeconds) continue;
+            
+            // Minimum time constraint: person must be lost for at least minReIdDelaySeconds
+            const timeSinceLost = currentTime - track.lastSeen;
+            if (timeSinceLost < this.minReIdDelaySeconds) continue;
             
             // Get average feature from track history
             const trackFeatures = this.featureHistory.get(trackId);
@@ -232,8 +244,11 @@ export class PersonTracker {
             
             const avgFeature = this.averageFeatures(trackFeatures);
             
-            let bestSimilarity = 0.5; // threshold
+            // Find best match for this lost track
+            let bestSimilarity = this.reIdSimilarityThreshold;
             let bestDetIdx = -1;
+            let bestDistanceScore = 0;
+            let bestCombinedScore = 0;
             
             for (let i = 0; i < detectionFeatures.length; i++) {
                 if (matchedDetectionIndices.has(i)) continue;
@@ -242,17 +257,78 @@ export class PersonTracker {
                 if (!detFeature) continue;
                 
                 const similarity = this.cosineSimilarity(avgFeature, detFeature);
-                if (similarity > bestSimilarity) {
+                if (similarity < this.reIdSimilarityThreshold) continue;
+                
+                // Spatial validation: check if detection is in reasonable distance from last position
+                const [lastX1, lastY1, lastX2, lastY2] = track.box;
+                const [detX1, detY1, detX2, detY2] = detectionFeatures[i].box;
+                
+                // Calculate centers
+                const lastCenterX = (lastX1 + lastX2) / 2;
+                const lastCenterY = (lastY1 + lastY2) / 2;
+                const detCenterX = (detX1 + detX2) / 2;
+                const detCenterY = (detY1 + detY2) / 2;
+                
+                // Calculate distance
+                const dx = detCenterX - lastCenterX;
+                const dy = detCenterY - lastCenterY;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                // Calculate reference distance (bbox diagonal)
+                const lastWidth = lastX2 - lastX1;
+                const lastHeight = lastY2 - lastY1;
+                const bboxDiagonal = Math.sqrt(lastWidth * lastWidth + lastHeight * lastHeight);
+                const maxAllowedDistance = bboxDiagonal * this.maxReIdDistanceRatio;
+                
+                // Spatial constraint: must be within reasonable distance
+                if (distance > maxAllowedDistance) continue;
+                
+                // Distance score (closer is better, normalized)
+                const distanceScore = 1.0 - Math.min(1.0, distance / maxAllowedDistance);
+                
+                // Combined score: similarity weighted higher than distance
+                const combinedScore = similarity * 0.8 + distanceScore * 0.2;
+                
+                // Update best match if combined score is better
+                if (combinedScore > bestCombinedScore || 
+                    (combinedScore === bestCombinedScore && similarity > bestSimilarity)) {
                     bestSimilarity = similarity;
+                    bestDistanceScore = distanceScore;
+                    bestCombinedScore = combinedScore;
                     bestDetIdx = i;
                 }
             }
             
             if (bestDetIdx >= 0) {
-                matchedPairs.push({ trackId, detIdx: bestDetIdx, matchType: 'reid', score: bestSimilarity });
-                matchedTrackIds.add(trackId);
-                matchedDetectionIndices.add(bestDetIdx);
+                reIdCandidates.push({ 
+                    trackId, 
+                    detIdx: bestDetIdx, 
+                    matchType: 'reid', 
+                    similarity: bestSimilarity,
+                    distanceScore: bestDistanceScore,
+                    combinedScore: bestSimilarity * 0.8 + bestDistanceScore * 0.2
+                });
             }
+        }
+        
+        // Sort candidates by combined score (best first) and match greedily
+        reIdCandidates.sort((a, b) => b.combinedScore - a.combinedScore);
+        
+        for (const candidate of reIdCandidates) {
+            // Skip if already matched
+            if (matchedTrackIds.has(candidate.trackId) || 
+                matchedDetectionIndices.has(candidate.detIdx)) {
+                continue;
+            }
+            
+            matchedPairs.push({
+                trackId: candidate.trackId,
+                detIdx: candidate.detIdx,
+                matchType: candidate.matchType,
+                score: candidate.similarity
+            });
+            matchedTrackIds.add(candidate.trackId);
+            matchedDetectionIndices.add(candidate.detIdx);
         }
         
         // Update matched tracks
