@@ -1,30 +1,81 @@
 /**
  * Re-Identification Person Tracker with 60-Second Memory
  * Maintains person IDs even when they disappear from camera for up to 60 seconds
+ * 
+ * Features:
+ * - Deep Learning-based Re-ID with OSNet architecture (SOTA)
+ * - Fallback to histogram-based features if model not available
+ * - Robust feature matching with cosine similarity
  */
 
 export class PersonTracker {
-    constructor(maxMemorySeconds = 60) {
+    constructor(maxMemorySeconds = 60, reIdDetector = null) {
         this.maxMemorySeconds = maxMemorySeconds;
         this.tracks = new Map(); // trackId -> Track
         this.nextId = 1;
         this.featureHistory = new Map(); // trackId -> feature history
         
+        // Re-ID model (deep learning-based)
+        this.reIdDetector = reIdDetector; // ReIDDetector instance
+        this.useDeepReId = false; // Will be set to true if model is loaded
+        
         // Re-identification parameters for better accuracy
         this.minReIdDelaySeconds = 0.5; // Minimum time before re-ID (prevents immediate false matches)
-        this.reIdSimilarityThreshold = 0.75; // Higher threshold for re-ID (was 0.5)
+        this.reIdSimilarityThreshold = 0.75; // Higher threshold for deep Re-ID (was 0.5)
+        this.histogramSimilarityThreshold = 0.75; // Threshold for histogram-based features
         this.maxReIdDistanceRatio = 2.0; // Max distance ratio from last position (2x bbox size)
+    }
+    
+    /**
+     * Set Re-ID detector model
+     */
+    setReIdDetector(reIdDetector) {
+        this.reIdDetector = reIdDetector;
+        this.useDeepReId = reIdDetector && reIdDetector.isReady();
+        
+        if (this.useDeepReId) {
+            console.log('✓ Using Deep Learning Re-ID model (OSNet-based)');
+            // Lower threshold for deep Re-ID (more accurate)
+            this.reIdSimilarityThreshold = 0.70;
+        } else {
+            console.log('⚠ Using histogram-based features (fallback)');
+        }
     }
 
     /**
-     * Extract simple feature vector from bounding box region
-     * In production, this would use a proper Re-ID model
+     * Extract feature vector from bounding box region
+     * Uses Deep Learning Re-ID model if available, otherwise falls back to histogram features
      */
-    extractFeature(imageData, box, canvas) {
+    async extractFeature(imageData, box, canvas) {
         const [x1, y1, x2, y2] = box.map(v => Math.round(v));
+        const width = x2 - x1;
+        const height = y2 - y1;
         
-        // Get region of interest
-        const ctx = canvas.getContext('2d');
+        if (width <= 0 || height <= 0) {
+            return null;
+        }
+        
+        // Use Deep Learning Re-ID model if available
+        if (this.useDeepReId && this.reIdDetector) {
+            try {
+                const features = await this.reIdDetector.extractFeature(imageData, box, canvas);
+                if (features && features.length > 0) {
+                    return features;
+                }
+            } catch (error) {
+                console.warn('Deep Re-ID feature extraction failed, falling back to histogram:', error);
+            }
+        }
+        
+        // Fallback to histogram-based features
+        return this.extractHistogramFeatures(imageData, box, canvas);
+    }
+    
+    /**
+     * Extract histogram-based features (fallback method)
+     */
+    extractHistogramFeatures(imageData, box, canvas) {
+        const [x1, y1, x2, y2] = box.map(v => Math.round(v));
         const width = x2 - x1;
         const height = y2 - y1;
         
@@ -145,10 +196,22 @@ export class PersonTracker {
 
     /**
      * Calculate cosine similarity between two feature vectors
+     * If using deep Re-ID model, features are already L2-normalized
      */
     cosineSimilarity(feat1, feat2) {
         if (!feat1 || !feat2) return 0;
+        if (feat1.length !== feat2.length) return 0;
         
+        // If using deep Re-ID, features are already normalized, so dot product = cosine similarity
+        if (this.useDeepReId && this.reIdDetector) {
+            let dotProduct = 0;
+            for (let i = 0; i < feat1.length; i++) {
+                dotProduct += feat1[i] * feat2[i];
+            }
+            return Math.max(0, Math.min(1, dotProduct));
+        }
+        
+        // For histogram features, compute cosine similarity normally
         let dotProduct = 0;
         let norm1 = 0;
         let norm2 = 0;
@@ -161,6 +224,13 @@ export class PersonTracker {
         
         const denominator = Math.sqrt(norm1) * Math.sqrt(norm2);
         return denominator > 0 ? dotProduct / denominator : 0;
+    }
+    
+    /**
+     * Get current similarity threshold based on feature type
+     */
+    getSimilarityThreshold() {
+        return this.useDeepReId ? this.reIdSimilarityThreshold : this.histogramSimilarityThreshold;
     }
 
     /**
@@ -186,16 +256,19 @@ export class PersonTracker {
 
     /**
      * Update tracker with new detections
+     * Note: extractFeature is now async (for deep Re-ID model)
      */
-    update(detections, imageData, canvas, currentTime) {
+    async update(detections, imageData, canvas, currentTime) {
         // Cleanup old tracks (older than maxMemorySeconds)
         this.cleanupOldTracks(currentTime);
         
-        // Extract features for new detections
-        const detectionFeatures = detections.map(det => ({
-            ...det,
-            feature: this.extractFeature(imageData, det.box, canvas)
-        }));
+        // Extract features for new detections (async for deep Re-ID)
+        const detectionFeatures = await Promise.all(
+            detections.map(async det => ({
+                ...det,
+                feature: await this.extractFeature(imageData, det.box, canvas)
+            }))
+        );
         
         // Match detections to existing tracks
         const matchedPairs = [];
@@ -245,7 +318,8 @@ export class PersonTracker {
             const avgFeature = this.averageFeatures(trackFeatures);
             
             // Find best match for this lost track
-            let bestSimilarity = this.reIdSimilarityThreshold;
+            const threshold = this.getSimilarityThreshold();
+            let bestSimilarity = threshold;
             let bestDetIdx = -1;
             let bestDistanceScore = 0;
             let bestCombinedScore = 0;
@@ -257,7 +331,7 @@ export class PersonTracker {
                 if (!detFeature) continue;
                 
                 const similarity = this.cosineSimilarity(avgFeature, detFeature);
-                if (similarity < this.reIdSimilarityThreshold) continue;
+                if (similarity < threshold) continue;
                 
                 // Spatial validation: check if detection is in reasonable distance from last position
                 const [lastX1, lastY1, lastX2, lastY2] = track.box;

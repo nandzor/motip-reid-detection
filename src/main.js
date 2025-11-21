@@ -2,12 +2,13 @@
  * Main Application: ONNX.js Real-time Webcam Person Tracker
  * Features:
  * - Real-time person detection using ONNX.js YOLOv8
- * - Re-identification person tracking
+ * - Deep Learning Re-Identification (OSNet-based SOTA model)
  * - 60-second memory persistence (maintains IDs when person disappears)
  */
 
 import { YOLOv8Detector } from './detector.js';
 import { PersonTracker } from './tracker.js';
+import { ReIDDetector } from './reid_detector.js';
 
 // Application state
 const app = {
@@ -16,6 +17,7 @@ const app = {
     ctx: null,
     detector: null,
     tracker: null,
+    reIdDetector: null, // Deep Learning Re-ID model
     isRunning: false,
     animationId: null,
     
@@ -42,8 +44,10 @@ const app = {
     
     // Config
     modelPath: '/models/yolov8n.onnx', // Update this path to your model
+    reIdModelPath: '/models/osnet.onnx', // Re-ID model path (optional)
     confidenceThreshold: 0.75,
-    maxMemorySeconds: 60
+    maxMemorySeconds: 60,
+    useDeepReId: true // Enable deep learning Re-ID if model is available
 };
 
 /**
@@ -73,23 +77,36 @@ async function init() {
     app.resetBtn.addEventListener('click', resetTracker);
     app.confidenceSlider.addEventListener('input', updateConfidenceThreshold);
     
-    // Try to load model (optional - will show error if not found)
+    // Try to load detection model (optional - will show error if not found)
     try {
         await loadModel();
-        updateStatus('ready', '✅ Model ready - Click "Start Webcam" to begin');
+        updateStatus('ready', '✅ Detection model ready - Loading Re-ID model...');
     } catch (error) {
-        console.warn('Model not loaded yet:', error.message);
-        updateStatus('idle', '⚠️ Model not found. Please place yolov8n.onnx in /public/models/');
+        console.warn('Detection model not loaded yet:', error.message);
+        updateStatus('idle', '⚠️ Detection model not found. Please place yolov8n.onnx in /public/models/');
     }
     
     // Initialize tracker
     app.tracker = new PersonTracker(app.maxMemorySeconds);
     
+    // Try to load Re-ID model (optional - will fallback to histogram features)
+    if (app.useDeepReId) {
+        try {
+            await loadReIdModel();
+            updateStatus('ready', '✅ Models ready - Click "Start Webcam" to begin');
+        } catch (error) {
+            console.warn('Re-ID model not loaded, using histogram features:', error.message);
+            updateStatus('ready', '✅ Detection model ready (Re-ID fallback: histogram) - Click "Start Webcam" to begin');
+        }
+    } else {
+        updateStatus('ready', '✅ Model ready - Click "Start Webcam" to begin');
+    }
+    
     console.log('✓ Application initialized');
 }
 
 /**
- * Load ONNX model
+ * Load YOLOv8 detection model
  */
 async function loadModel() {
     console.log('Loading YOLOv8 model from:', app.modelPath);
@@ -103,13 +120,40 @@ async function loadModel() {
     
     try {
         await app.detector.load();
-        console.log('✓ Model loaded successfully');
+        console.log('✓ YOLOv8 detection model loaded successfully');
         console.log('Model session:', app.detector.session ? 'ready' : 'not ready');
         return true;
     } catch (error) {
-        console.error('Failed to load model:', error);
+        console.error('Failed to load detection model:', error);
         app.detector = null;
         throw error;
+    }
+}
+
+/**
+ * Load Re-ID model (OSNet-based SOTA)
+ */
+async function loadReIdModel() {
+    console.log('Loading Re-ID model from:', app.reIdModelPath);
+    
+    // Create Re-ID detector instance
+    app.reIdDetector = new ReIDDetector(app.reIdModelPath);
+    
+    try {
+        const loaded = await app.reIdDetector.load();
+        if (loaded && app.reIdDetector.isReady()) {
+            console.log('✓ Re-ID model loaded successfully');
+            // Integrate Re-ID detector with tracker
+            app.tracker.setReIdDetector(app.reIdDetector);
+            return true;
+        } else {
+            throw new Error('Re-ID model failed to load');
+        }
+    } catch (error) {
+        console.warn('Failed to load Re-ID model (using histogram fallback):', error);
+        app.reIdDetector = null;
+        // Don't throw error - allow fallback to histogram features
+        return false;
     }
 }
 
@@ -137,19 +181,31 @@ async function startWebcam() {
             app.canvas.width = app.video.videoWidth;
             app.canvas.height = app.video.videoHeight;
             
-            // Load model first if not loaded
+            // Load detection model first if not loaded
             if (!app.detector || !app.detector.session) {
-                updateStatus('running', '🔄 Loading model...');
+                updateStatus('running', '🔄 Loading detection model...');
                 try {
                     await loadModel();
-                    updateStatus('running', '✅ Webcam active - Tracking persons...');
+                    updateStatus('running', '✅ Detection model loaded - Loading Re-ID...');
                 } catch (error) {
-                    console.error('Failed to load model:', error);
-                    updateStatus('error', '❌ Failed to load model: ' + error.message);
+                    console.error('Failed to load detection model:', error);
+                    updateStatus('error', '❌ Failed to load detection model: ' + error.message);
                     stopWebcam();
                     return;
                 }
             }
+            
+            // Try to load Re-ID model if not loaded yet
+            if (app.useDeepReId && (!app.reIdDetector || !app.reIdDetector.isReady())) {
+                try {
+                    await loadReIdModel();
+                    console.log('✓ Re-ID model loaded successfully');
+                } catch (error) {
+                    console.warn('Re-ID model not available, using histogram features:', error);
+                }
+            }
+            
+            updateStatus('running', '✅ Webcam active - Tracking persons...');
             
             // Start processing only after model is loaded
             app.isRunning = true;
@@ -306,8 +362,8 @@ async function processDetection() {
         
         app.totalDetections = result.detections.length;
         
-        // Update tracker
-        const tracks = app.tracker.update(
+        // Update tracker (now async for deep Re-ID feature extraction)
+        const tracks = await app.tracker.update(
             result.detections,
             app.video,
             app.canvas,

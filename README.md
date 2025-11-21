@@ -5,7 +5,8 @@ Real-time person tracking with ONNX.js, featuring re-identification and 60-secon
 ## 🎯 Features
 
 - **Real-time Detection**: ONNX.js YOLOv8 person detection running directly in the browser
-- **Re-Identification**: Feature-based person matching to maintain consistent IDs
+- **Deep Learning Re-Identification**: State-of-the-Art (SOTA) OSNet-based Re-ID model for accurate person matching
+- **Fallback System**: Automatic fallback to histogram-based features if Re-ID model is not available
 - **60-Second Memory**: Maintains person IDs even when they disappear from camera for up to 60 seconds
 - **Webcam Streaming**: Live video processing with bounding boxes and ID labels
 - **Performance Stats**: Real-time FPS, active tracks, and detection count
@@ -13,7 +14,8 @@ Real-time person tracking with ONNX.js, featuring re-identification and 60-secon
 ## 📋 Prerequisites
 
 1. **Node.js** (v16 or higher)
-2. **YOLOv8 ONNX Model**: `yolov8n.onnx` file
+2. **YOLOv8 ONNX Model**: `yolov8n.onnx` file (required)
+3. **Re-ID ONNX Model**: `osnet.onnx` file (optional, falls back to histogram features if not available)
 
 ## 🚀 Quick Start
 
@@ -23,20 +25,27 @@ Real-time person tracking with ONNX.js, featuring re-identification and 60-secon
 npm install
 ```
 
-### 2. Prepare Model File
+### 2. Prepare Model Files
 
-You need to convert YOLOv8 to ONNX format and place it in the `public/models/` directory:
+You need to prepare ONNX models and place them in the `public/models/` directory:
 
 ```bash
-# Option 1: Convert existing YOLOv8 model
+# Create models directory
+mkdir -p public/models
+
+# Option 1: Convert YOLOv8 to ONNX format
 pip install ultralytics onnx
 python -c "from ultralytics import YOLO; model = YOLO('yolov8n.pt'); model.export(format='onnx')"
+# Copy yolov8n.onnx to public/models/
 
-# Option 2: Download pre-converted model (if available)
-# Place yolov8n.onnx in web-client/public/models/
+# Option 2: Download pre-converted models (if available)
+# - Place yolov8n.onnx in web-client/public/models/ (required)
+# - Place osnet.onnx in web-client/public/models/ (optional - for deep Re-ID)
 
-mkdir -p public/models
-# Copy your yolov8n.onnx file to public/models/
+# Option 3: Use OSNet Re-ID model
+# Download OSNet model from: https://github.com/KaiyangZhou/deep-person-reid
+# Convert to ONNX format and place as osnet.onnx in public/models/
+# Note: System will automatically fallback to histogram features if Re-ID model is not available
 ```
 
 ### 3. Run Development Server
@@ -61,11 +70,13 @@ The built files will be in the `dist/` directory.
 web-client/
 ├── src/
 │   ├── detector.js      # ONNX.js YOLOv8 detector
+│   ├── reid_detector.js # Deep Learning Re-ID detector (OSNet-based)
 │   ├── tracker.js       # Re-ID person tracker with memory
 │   └── main.js          # Main application logic
 ├── public/
 │   └── models/
-│       └── yolov8n.onnx # YOLOv8 ONNX model (place here)
+│       ├── yolov8n.onnx # YOLOv8 ONNX model (required)
+│       └── osnet.onnx   # OSNet Re-ID ONNX model (optional)
 ├── index.html           # Main HTML file
 ├── package.json         # Dependencies
 ├── vite.config.js       # Vite configuration
@@ -98,12 +109,14 @@ Adjust the confidence threshold using the slider in the UI, or set default in `s
 confidenceThreshold: 0.5  // Range: 0.1 - 0.9
 ```
 
-### Model Path
+### Model Paths
 
-Update the model path in `src/main.js` if your model is located elsewhere:
+Update the model paths in `src/main.js` if your models are located elsewhere:
 
 ```javascript
-modelPath: '/models/yolov8n.onnx'  // Update path as needed
+modelPath: '/models/yolov8n.onnx',     // YOLOv8 detection model (required)
+reIdModelPath: '/models/osnet.onnx',   // Re-ID model (optional)
+useDeepReId: true                      // Enable deep Re-ID (set false to use histogram only)
 ```
 
 ## 🔬 Metode Ilmiah dan Teknik
@@ -240,7 +253,41 @@ MOTIP adalah pilihan yang tepat karena:
    - Konversi format: center (cx, cy, w, h) → corner (x1, y1, x2, y2)
    - Scale bounding box ke original image size
 
-### Teknik Tracking: Re-Identification dengan Feature Extraction
+### Teknik Tracking: Deep Learning Re-Identification (SOTA)
+
+#### Arsitektur Re-ID: OSNet (Omni-Scale Network)
+
+Sistem ini menggunakan **OSNet-based Re-ID model** yang merupakan state-of-the-art (SOTA) untuk person re-identification:
+
+**OSNet Architecture**:
+- **Input**: Person crop image (256×128 pixels, height×width)
+- **Preprocessing**: ImageNet normalization (mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+- **Backbone**: Omni-Scale Network dengan multi-scale feature extraction
+- **Output**: 512-dimensional feature embedding (L2-normalized)
+- **Matching**: Cosine similarity (dot product untuk L2-normalized vectors)
+
+**Keunggulan OSNet**:
+- Lightweight untuk deployment di web browser
+- Akurat untuk variasi pose, viewpoint, dan illumination
+- Robust terhadap occlusion parsial
+- Menggunakan attention mechanism untuk fokus pada area diskriminatif
+
+#### Fallback System: Histogram-based Features
+
+Jika Re-ID model tidak tersedia, sistem secara otomatis menggunakan **histogram-based features**:
+
+**Color Histogram Features**:
+- RGB histogram dengan 8 bins per channel (total 24 features)
+- Normalisasi per pixel untuk robust terhadap lighting changes
+
+**Spatial Features**:
+- Center region vs edge region analysis
+- Menangkap pola distribusi warna spasial
+- Width/height ratio untuk shape information
+
+**Total Feature Vector**: 30 dimensi
+- 24 histogram features (8×3 channels)
+- 6 spatial features (center RGB, edge RGB)
 
 #### Dual-Matching Strategy (Bukan Hungarian Algorithm seperti DeepSORT)
 
@@ -257,7 +304,7 @@ Sistem ini menggunakan **greedy matching** dua tahap, bukan Hungarian algorithm 
    - Untuk lost tracks yang masih dalam memory window (< 60 detik)
    - Cosine similarity untuk re-identifikasi:
    $$Sim(u, v) = \frac{u \cdot v}{||u|| ||v||}$$
-   - Threshold: 0.5 untuk similarity matching
+   - Threshold: **0.70** untuk deep Re-ID, **0.75** untuk histogram features
    - **Average feature dari history** (bukan single embedding seperti DeepSORT)
    - Mengatasi masalah oklusi jangka panjang
 
@@ -266,21 +313,6 @@ Sistem ini menggunakan **greedy matching** dua tahap, bukan Hungarian algorithm 
 - Hungarian algorithm memiliki kompleksitas $O(n^3)$ yang lebih berat
 - Greedy matching dengan dua tahap memberikan hasil yang memadai
 - Cocok untuk skenario dengan jumlah objek terbatas (person tracking)
-
-#### Feature Extraction
-
-**Color Histogram Features**:
-- RGB histogram dengan 8 bins per channel (total 24 features)
-- Normalisasi per pixel untuk robust terhadap lighting changes
-
-**Spatial Features**:
-- Center region vs edge region analysis
-- Menangkap pola distribusi warna spasial
-- Width/height ratio untuk shape information
-
-**Total Feature Vector**: 30 dimensi
-- 24 histogram features (8×3 channels)
-- 6 spatial features (center RGB, edge RGB)
 
 #### Feature History Management
 
@@ -427,7 +459,9 @@ Sistem ini menggunakan **greedy matching** dua tahap, bukan Hungarian algorithm 
 **Error**: "Model not found"
 
 **Solution**: 
-- Ensure `yolov8n.onnx` is in `public/models/` directory
+- Ensure `yolov8n.onnx` is in `public/models/` directory (required)
+- For deep Re-ID, ensure `osnet.onnx` is in `public/models/` directory (optional)
+- If Re-ID model not found, system will automatically use histogram-based features
 - Check browser console for exact path issues
 
 ### Webcam Access Denied
