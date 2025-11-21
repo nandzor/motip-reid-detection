@@ -20,7 +20,6 @@ Real-time person tracking with ONNX.js, featuring re-identification and 60-secon
 ### 1. Install Dependencies
 
 ```bash
-cd web-client
 npm install
 ```
 
