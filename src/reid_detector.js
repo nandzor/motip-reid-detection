@@ -14,7 +14,7 @@
 
 export class ReIDDetector {
     constructor(modelPath = null) {
-        this.modelPath = modelPath || '/models/osnet.onnx'; // Default OSNet model path
+        this.modelPath = modelPath || '/models/osnet_ain_x1_0.onnx'; // Default OSNet model path
         this.session = null;
         this.inputShape = [1, 3, 256, 128]; // Standard Re-ID input: 256x128 (height x width)
         this.inputHeight = 256;

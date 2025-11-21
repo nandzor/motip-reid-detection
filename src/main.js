@@ -44,7 +44,7 @@ const app = {
     
     // Config
     modelPath: '/models/yolov8n.onnx', // Update this path to your model
-    reIdModelPath: '/models/osnet.onnx', // Re-ID model path (optional)
+    reIdModelPath: '/models/osnet_ain_x1_0.onnx', // Re-ID model path (optional)
     confidenceThreshold: 0.75,
     maxMemorySeconds: 60,
     useDeepReId: true // Enable deep learning Re-ID if model is available
